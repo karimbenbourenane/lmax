@@ -1,0 +1,1275 @@
+<h1>The LMAX Java API</h1>
+<h2>Contents</h2>
+<b>
+    <br/><a href="Tutorial.html#1">1. Key Concepts</a>
+    <br/><a href="Tutorial.html#2">2. Notes On Asynchronous Systems</a>
+    <br/><a href="Tutorial.html#3">3. Specifying Decimal Numbers Correctly</a>
+    <br/><a href="Tutorial.html#4">4. Lets Get Started! - Logging In</a>
+    <br/><a href="Tutorial.html#5">5. Subscribing to Market Data</a>
+    <br/><a href="Tutorial.html#6">6. Placing Orders</a>
+    <br/><a href="Tutorial.html#7">7. Cancelling Orders</a>
+    <br/><a href="Tutorial.html#8">8. Handling Rejects</a>
+    <br/><a href="Tutorial.html#9">9. Handling Errors on Requests</a>
+    <br/><a href="Tutorial.html#10">10. Handling Errors on the Event Stream</a>
+    <br/><a href="Tutorial.html#11">11. Handling Session Disconnection</a>
+    <br/><a href="Tutorial.html#12">12. Using and Amending Stops</a>
+    <br/><a href="Tutorial.html#13">13. Subscribing to Other Events</a>
+    <br/><a href="Tutorial.html#14">14. Requesting Account State</a>
+    <br/><a href="Tutorial.html#15">15. Retrieving Security Definitions</a>
+    <br/><a href="Tutorial.html#16">16. Retrieving Historic Market Data</a>
+    <br/><a href="Tutorial.html#17">17. HTTP Keep-Alive</a>
+    <br/><a href="Tutorial.html#18">18. Protocol Version Checking</a>
+    <br/><a href="Tutorial.html#19">19. Tracking Orders and Executions</a>
+    <br/><a href="Tutorial.html#20">20. Debug logging and profiling callbacks</a>
+</b>
+
+<h3 id="1">1. Key Concepts</h3>
+
+<p>The LMAX Java API is a thin Java layer over our existing XML over HTTPS (REST)
+    protocol. The goal of the API is to provide a simplified programming
+    model for Java-based clients connecting to the LMAX Trader platform.</p>
+
+<p>The design of the API contains 5 key concepts: Requests, Callbacks,
+    Events, EventListeners, and the Session. Requests and Callbacks are used
+    when making requests to LMAX Trader, e.g. placing orders or subscribing
+    to order book events. EventListeners are used to propagate Events that
+    are received asynchronously from LMAX Trader, e.g. market data or execution
+    reports. The final concept is the Session which is the core interface used
+    to send requests to LMAX Trader or register EventListeners.
+</p>
+
+<h3 id="2">2. Notes On Asynchronous Systems</h3>
+
+<p>The protocol used to communicate with LMAX Trader (and therefore the API that
+    sits on top of it) is fundamentally asynchronous. Data is returned from the API
+    through either a Callback as the result of a Request or as an Event passed to
+    an EventListener. For this reason, you may notice that almost all of the
+    methods in the API have void return values.
+</p>
+<p>Anyone who has done UI programming, e.g. using Swing or GWT, will find the LMAX
+    API's asynchronous programming model very natural. Programmers who haven't done
+    so may find this programming model counter-intuitive at first, but with a little
+    practice it should become second nature. It may be necessary to become familiar
+    with some slightly more advanced Java features such as anonymous inner classes.
+</p>
+
+<h3 id="3">3. Specifying Decimal Numbers Correctly</h3>
+
+<p>Quantities, prices and offsets are expressed as FixedPointNumber objects for
+    increased accuracy and performance. Early versions of the API used the java
+    BigDecimal type, but this is inefficient when writing high-performance code
+    because of the cost of garbage collection and can lead to arithmetic inaccuracies
+    if initialised with double values.
+</p>
+<p>
+    FixedPointNumbers can be initialised from either a String or a long. When using
+    long values to represent FixedPointNumbers, the lowest six digits are used as the
+    decimal portion. For example, to create a FixedPointNumber representing the price
+    1.234 using a long, you would use the following:
+</p>
+<pre>
+    FixedPointNumber.valueOf(1234000L)
+</pre>
+<p>
+    You can read long values as a decimal number by simply inserting a decimal
+    point before the 6th least significant digit. Some more examples:
+</p>
+
+<ul>
+    <li><code>FixedPointNumber.valueOf(1000000L).equals(FixedPointNumber.valueOf("1"))</code></li>
+    <li><code>FixedPointNumber.valueOf(1000001L).equals(FixedPointNumber.valueOf("1.000001"))</code></li>
+    <li><code>FixedPointNumber.valueOf(3141592L).equals(FixedPointNumber.valueOf("3.141592"))</code></li>
+    <li><code>FixedPointNumber.valueOf(-3141592L).equals(FixedPointNumber.valueOf("-3.141592"))</code></li>
+</ul>
+
+<p>Using Strings to create your FixedPointNumbers makes the code easily readable, but if
+    you are executing a strategy and need to calculate new values it may make more sense
+    to do that maths using long values so that your code will perform better.</p>
+
+<p>If you prefer to use arbitrary precision or floating point math for your strategy,
+    there there is a utility class called FixedPointNumbers that can be used to
+    construct a FixedPointNumber from a variety of formats. In addition to the
+    conversion, FixedPointNumbers also rounds the number (half-even) to the price or
+    quantity increment required. This is to prevent errors where a price or a quantity
+    specified does not match the scale of the instrument.</p>
+
+<pre>
+import static com.lmax.api.FixedPointNumbers.toFixedPointNumber;
+
+FixedPointNumber priceIncrement = instrument.getOrderBook().getPriceIncrement();
+
+FixedPointNumber price1 = toFixedPointNumber(1345000L, priceIncrement); 
+FixedPointNumber price2 = toFixedPointNumber(1.345D,   priceIncrement); 
+FixedPointNumber price3 = toFixedPointNumber(new BigDecimal("1.345"), priceIncrement); 
+</pre>
+
+<p>FixedPointNumbers can also be used to convert a FixedPointNumber to a number of formats</p>
+
+<pre>
+FixedPointNumber price = FixedPointNumber.valueOf(1234000L);
+BigDecimal price1 = FixedPointNumbers.bigDecimalValue(price);
+double price2 = FixedPointNumbers.doubleValue(price);
+</pre>
+
+<h3 id="4">4. Lets Get Started! - Logging In</h3>
+
+<p>To make the initial connection to LMAX Trader, first you need to construct an
+    instance of LmaxApi. LmaxApi only requires a single argument which is the HTTPS URI
+    for LMAX Trader. This would be "https://api.lmaxtrader.com" for production or
+    "https://testapi.lmaxtrader.com" for the test system.</p>
+<pre>
+public static void main(String[] args)
+{
+    String url = "https://testapi.lmaxtrader.com";
+    LmaxApi lmaxApi = new LmaxApi(url);
+}
+</pre>
+<p>Once the LmaxApi instance has been created, the next thing to do is construct a LoginRequest.
+    LoginRequest requires a username and password as part of the constructor. There is a second
+    optional parameter. This (confusingly) is called ProductType, this can be left out if
+    connecting to production, however if supplied it must be set to ProductType.CFD_LIVE. If
+    connecting to the testapi system, then ProductType.CFD_DEMO must be used.</p>
+<pre>
+public static void main(String[] args)
+{
+    // ... lines omitted.
+    LoginRequest loginRequest = new LoginRequest("myusername", "mypassword", ProductType.CFD_DEMO);
+    LoginCallback loginCallback = // next step.
+    lmaxApi.login(loginRequest, loginCallback);
+}
+</pre>
+<p>The final step of the login process is to implement a handler for the LoginCallback.
+    The <code>onLoginSuccess(Session session)</code> of the Callback
+    should be considered the "entry point" of the client application. It is from within this
+    Callback where the application should setup listeners and create subscriptions to the information
+    that it is interested in. It is the point where the Session is provided to the application.
+    A reference to the session should be captured, and held onto for later use. A common pattern is
+    to make the main application class implement the LoginCallback interface.</p>
+<pre>
+public class MyTradingBot implements LoginCallback
+{
+    private Session session;
+
+    public void onLoginSuccess(Session session)
+    {
+        System.out.printf("Logged in, account details: %s%n", session.getAccountDetails());
+
+        this.session = session; // Capture the session for use later.
+
+        // Register EventListeners, subscribe to data and start the session.
+        // More detail on this later.
+    }
+
+    public void onLoginFailure(FailureResponse failureResponse)
+    {
+        System.err.printf("Failed to login, reason: %s%n", failureResponse);
+    }
+
+    public static void main(String[] args)
+    {
+        MyTradingBot myTradingBot = new MyTradingBot();
+
+        LmaxApi lmaxApi = new LmaxApi("https://testapi.lmaxtrader.com");
+        lmaxApi.login(new LoginRequest("user", "pass", ProductType.CFD_DEMO), myTradingBot);
+    }
+}
+</pre>
+<p>All of the Callback interfaces define both onSuccess and onFailure methods. The signature
+    of the onSuccess method may differ for different types of requests, however the onFailure method
+    will always contain a FailureResponse object. This is covered in more detail in the section on
+    <a href="Tutorial.html#8">Handling Rejects</a>.
+
+<h3 id="5">5. Subscribing to Market Data</h3>
+
+<p>Now that the application has successfully logged in, it's time to do something useful -
+    subscribing to some market data. The login call introduced the first two concepts of
+    Requests and Callbacks. Subscribing to market data involves the remaining three
+    concepts: Events, EventListeners and the Session. Within the LoginCallback.onLoginSuccess()
+    method, the application should first register an order book EventListener, then use
+    the Session to send a request to subscribe to the market data for a specific order
+    book. Order book subscriptions are made on a per instrument basis. The most common pattern
+    is to make the main trading application class implement the OrderBookEventListener
+    interface. Whenever a price change is pushed out to the client, the
+    OrderBookEventListener.notify() method will be called with an OrderBookEvent that
+    will contain the current market data for a specific order book.</p>
+
+<p>Once all of the listeners and subscriptions are set up then the application needs to
+    start the session. The start call is very important as it starts the connection to
+    the asynchronous event stream. It should be noted that this call will block until the
+    session is explicitly stopped - typically when the application wants to shut down.
+    The LMAX Java API does not use multiple threads internally. However, it does not
+    prevent multi-threaded application being written using the API. The Session can be
+    safely used across multiple threads (it will prevent start being called twice on the
+    same session).</p>
+
+<p>The mechanism for finding instrumentIds is covered in the section on
+    <a href="Tutorial.html#15">Retrieving Security Definitions</a>.  For the purposes of these
+    examples we will assume that the instrumentId is known ahead of time.</p>
+
+<pre>
+public class MyTradingBot implements LoginCallback, OrderBookEventListener
+{
+    private final static long GBP_USD_INSTRUMENT_ID = 4001;
+
+    public void notify(OrderBookEvent orderBookEvent)
+    {
+        System.out.printf("Market data: %s%n", orderBookEvent);
+    }
+
+    public void onLoginSuccess(Session session)
+    {
+        session.registerOrderBookEventListener(this);
+        session.subscribe(new OrderBookSubscriptionRequest(GBP_USD_INSTRUMENT_ID), new Callback()
+        {
+            public void onSuccess()
+            {
+                System.out.println("Successful subscription");
+            }
+
+            public void onFailure(FailureResponse failureResponse)
+            {
+                System.err.printf("Failed to subscribe: %s%n", failureResponse);
+            }
+        });
+
+        session.start();
+    }
+}
+</pre>
+
+<h3 id="6">6. Placing Orders</h3>
+<h4 id="6.1">Placing a new order</h4>
+<p>The LMAX Trader platform supports a number of different order types and we are continually
+    adding more. This section will just cover the basics of Market and Limit orders. Placing an
+    order is very simple. It is just another case of constructing a request and waiting for a
+    Callback. However, the Callback will only tell you that the request has been received by
+    the LMAX Trader platform, not that it has been processed. Obtaining the results of the
+    order placement requires subscribing to another type of data, in this case execution reports.
+    Once your order has been processed, the LMAX Trader platform will send out an Execution event,
+    which you can listen for on the ExecutionEventListener interface.
+    (There is a later section on <a href="Tutorial.html#13">Subscribing to Other Events</a>).
+</p>
+
+<p>The request objects for Market and Limit orders are called MarketOrderSpecification and
+    LimitOrderSpecification. To differentiate between buy orders and sell orders, the LMAX Trader
+    platform uses signed quantities. To place a buy order, use a positive quantity; to place a
+    sell order, use a negative one.</p>
+
+<p>When placing an order, an instructionId must be provided. This should be retained so that
+    it can be used to cancel or amend the order later.</p>
+
+<p>The below example shows a sample trading bot.  It performs some basic order tracking (though it does
+    not handle partially-filled Executions).</p>
+<pre>
+public class MyTradingBot implements LoginCallback, OrderBookEventListener, ExecutionEventListener
+{
+    private final List&lt;Long&gt; newOrders = new LinkedList&lt;Long&gt;();
+    private final List&lt;Long&gt; pendingOrders = new LinkedList&lt;Long&gt;();
+    private final List&lt;Order&gt; placedOrders = new LinkedList&lt;Order&gt;();
+
+    private final MarketOrderSpecification marketOrderSpecification =
+        new MarketOrderSpecification(0, 100, FixedPointNumber.valueOf("2.0"),
+                                     TimeInForce.IMMEDIATE_OR_CANCEL);
+
+    private final LimitOrderSpecification limitOrderSpecification =
+        new LimitOrderSpecification(1, 101,
+                                    FixedPointNumber.valueOf("1.0"),
+                                    FixedPointNumber.valueOf("0.0"),
+                                    TimeInForce.GOOD_FOR_DAY);
+    private Session session;
+
+    public void notify(OrderBookEvent orderBookEvent)
+    {
+        if (shouldTradeGivenCurrentMarketData(orderBookEvent))
+        {
+            placeMarketOrder(orderBookEvent.getInstrumentId(), generateNextInstructionId());
+
+            FixedPointNumber sellPrice = calculateSellPrice(orderBookEvent);
+            placeSellLimitOrder(orderBookEvent.getInstrumentId(), sellPrice, generateNextInstructionId());
+        }
+    }
+
+    public void notify(Execution execution)
+    {
+        if (pendingOrders.remove(execution.getOrder().getInstructionId()))
+        {
+            placedOrders.add(execution.getOrder());
+        }
+    }
+
+    public void placeMarketOrder(long instrumentId, final long instructionId)
+    {
+        // Place a market order to buy, note that we can re-use an
+        // order specification to place multiple orders but the instructionId
+        // must be reset each time a new order is placed
+        marketOrderSpecification.setInstrumentId(instrumentId);
+
+        marketOrderSpecification.setInstructionId(instructionId);
+        newOrders.add(instructionId);
+
+        session.placeMarketOrder(marketOrderSpecification, new OrderCallback()
+        {
+            public void onSuccess(long placeOrderInstructionId)
+            {
+                // note - this will be the same instructionId from above,
+                // it confirms this success is related to that specific place order request
+
+                //move from "new" to "pending" to show the order was successfully placed
+                newOrders.remove(placeOrderInstructionId);
+                pendingOrders.add(placeOrderInstructionId);
+            }
+
+            public void onFailure(FailureResponse failureResponse)
+            {
+                newOrders.remove(instructionId);
+                System.out.printf("Failed to place market order: %s%n", failureResponse);
+            }
+        });
+    }
+
+    public void placeSellLimitOrder(long instrumentId, FixedPointNumber sellPrice, final long instructionId)
+    {
+        // Place a limit order to sell.
+        limitOrderSpecification.setInstrumentId(instrumentId);
+        limitOrderSpecification.setPrice(sellPrice);
+        limitOrderSpecification.setQuantity(FixedPointNumber.valueOf("-2.0")); // Negative to indicate sell
+
+        limitOrderSpecification.setInstructionId(instructionId);
+        newOrders.add(instructionId);
+
+        session.placeLimitOrder(limitOrderSpecification, new OrderCallback()
+        {
+            public void onSuccess(long placeOrderInstructionId)
+            {
+                //move from "new" to "pending" to show the order was successfully placed
+                newOrders.remove(placeOrderInstructionId);
+                pendingOrders.add(placeOrderInstructionId);
+            }
+
+            public void onFailure(FailureResponse failureResponse)
+            {
+                newOrders.remove(instructionId);
+                System.out.printf("Failed to place market order: %s%n", failureResponse);
+            }
+        });
+    }
+
+    public void onLoginSuccess(Session session)
+    {
+        // ... lines omitted.
+
+        session.registerExecutionEventListener(this);
+
+        session.subscribe(new ExecutionSubscriptionRequest(), new Callback()
+        {
+            // ...
+        });
+    }
+}
+</pre>
+<h4 id="6.2">Placing a closing order</h4>
+<p>The LMAX platform provides the functionality to close all or part of a position on an instrument,
+    and all or part of a specified order.  Placing a closing order places an order on the opposite
+    side to an existing order or set of orders and reduces the amount of open quantity on this instrument.
+</p>
+<p>Placing a closing order is similar to placing a new one, and also uses the OrderCallback interface. As with
+    placing an order, an instructionId must be provided. This can be retained to correlate the response
+    (successful or otherwise) to the original request. If an originalInstructionId is provided, the closing
+    order will close out part or all of the specified original order.  If not specified, the closing order will 
+    close against the total instrument position.   In addition, you must specify the ID of the
+    instrument the position is against and the quantity to close. Like all quantities, this is signed
+    according to the direction of the order. If the order you're trying to close is a buy (a
+    positive quantity), the close quantity needs to be the opposite (a negative quantity).</p>
+<pre>
+public class MyTradingBot implements LoginCallback, OrderBookEventListener, ExecutionEventListener
+{
+    private Session session;
+    private final long instrumentId = 4001L;
+
+    public void closeQuantityOfInstrumentPosition(final long quantityToClose)
+    {
+        final long closeRequestInstructionId = generateNextInstructionId();
+        session.placeClosingOrder(new ClosingOrderSpecification(closeRequestInstructionId, instrumentId, FixedPointNumber.valueOf(quantityToClose)), new OrderCallback()
+        {
+            @Override
+            public void onSuccess(final long instructionId)
+            {
+                //this instructionId will be the same as closeRequestInstructionId
+                System.out.printf("Quantity %d of position closed with instruction id: %d%n", quantityToClose, instructionId);
+            }
+
+            @Override
+            public void onFailure(final FailureResponse failureResponse)
+            {
+                System.out.printf("Failed to close position: %s%n", failureResponse);
+            }
+        });
+    }
+
+    public void closeQuantityOfOrder(final long quantityToClose, final long originalInstructionId)
+    {
+        final long closeRequestInstructionId = generateNextInstructionId();
+        session.placeClosingOrder(new ClosingOrderSpecification(closeRequestInstructionId, instrumentId, originalInstructionId,
+                                                                FixedPointNumber.valueOf(quantityToClose)), new OrderCallback()
+        {
+            @Override
+            public void onSuccess(final long instructionId)
+            {
+                //this instructionId will be the same as closeRequestInstructionId
+                System.out.printf("Quantity %d of position closed with instruction id: %d%n", quantityToClose, instructionId);
+            }
+
+            @Override
+            public void onFailure(final FailureResponse failureResponse)
+            {
+                System.out.printf("Failed to close position: %s%n", failureResponse);
+            }
+        });
+    }
+}
+</pre>
+<h3 id="7">7. Cancelling Orders</h3>
+<p>Cancelling orders is very similar to placing orders, and shares the same OrderCallback interface. A
+    CancelOrderRequest requires the instrumentId and the instructionId ('originalInstructionId')
+    of the original order that you want to cancel.
+</p>
+<p> On a successful placement of CancelOrderRequest, the instructionId of the CancelOrderRequest
+    is returned.
+</p>
+<pre>
+public class MyTradingBot implements LoginCallback, OrderBookEventListener, ExecutionEventListener
+{
+    private Session session;
+    private final long instrumentId; // .....
+    private final List&lt;Long&gt; workingOrders = new LinkedList&lt;Long&gt;();
+
+    public void cancelAllOrders()
+    {
+        cancelOrders(workingOrders);
+    }
+
+    public void cancelOrders(List&lt;Long&gt; instructionIds)
+    {
+        for (long originalInstructionId : instructionIds)
+        {
+            final long cancelRequestInstructionId = generateNextInstructionId();
+            session.cancelOrder(new CancelOrderRequest(instrumentId, originalInstructionId, cancelRequestInstructionId), new OrderCallback()
+            {
+                public void onSuccess(long instructionId)
+                {
+                    //this instructionId will be the same as cancelRequestInstructionId
+                    System.out.printf("Cancel order instruction placed: %d%n", instructionId);
+                }
+
+                public void onFailure(FailureResponse failureResponse)
+                {
+                    System.out.printf("Failed to cancel order: %s%n", failureResponse);
+                }
+            });
+        }
+    }
+}
+</pre>
+
+<h3 id="8">8. Handling Rejects</h3>
+<p>Because the LMAX Trader platform is asynchronous, it is not possible for all classes of order
+    failures to be handled in the onFailure method of the OrderCallback. A Request may be syntactically
+    valid, but could be rejected at some point later by the Broker or the MTF. Possible reasons for
+    rejections could include: EXPOSURE_CHECK_FAILURE or INSUFFICIENT_LIQUIDITY (full set available in
+    instructionRejected-event.rng). These events are returned in the same way that executions are
+    returned, via the event stream. So to be notified of rejection events it is necessary to implement
+    the InstructionRejectedEventListener interface and register the listener with the session. There is
+    no specific subscription for instruction rejects, using ExecutionSubscriptionRequest will also subscribe
+    to instruction rejected events.</p>
+<pre>
+public class MyTradingBot implements LoginCallback, InstructionRejectedEventListener
+{
+
+    public void notify(InstructionRejectedEvent instructionRejected)
+    {
+        System.out.printf("Rejection received: %s%n", instructionRejected);
+    }
+
+    public void onLoginSuccess(Session session)
+    {
+        session.registerInstructionRejectedEventListener(this);
+        session.subscribe(new ExecutionSubscriptionRequest(), new Callback()
+        {
+            // ...
+        });
+    }
+}
+</pre>
+<h3 id="9">9. Handling Errors on Requests</h3>
+<p>The onFailure methods in the Callback interfaces are invoked in two different scenarios.
+    The first is application failures. This is where the request has been successfully
+    received by the LMAX Trader platform, but it detected that there is an error in the
+    data, e.g. the price is negative or the quantity is zero. The second is system failures.
+    This is where the request may not have been received by the LMAX Trader platform (for
+    example, because of a network connectivity problem), or where the request could not be parsed.
+    The FailureResponse.isSystemFailure() method indicates the type of failure.
+</p>
+<p>
+    If the failure was the result of an exception, the exception will be stored in the
+    FailureResponse. Not all system failures will be the result of an exception, e.g.
+    if the response to the HTTP result was not a "200 OK" then a system failure will
+    be generated. The actual response code will be in the getMessage() part of the
+    FailureResponse.</p>
+<pre>
+session.placeMarketOrder(marketOrder, new OrderCallback()
+{
+    public void onSuccess(long instructionId)
+    {
+    }
+
+    public void onFailure(FailureResponse failureResponse)
+    {
+        if (!failureResponse.isSystemFailure())
+        {
+            System.err.printf("Data Error - Message: %s, Description: %s",
+                              failureResponse.getMessage(),
+                              failureResponse.getDescription());
+        }
+        else
+        {
+            Exception e = failureResponse.getException();
+            if (null != e)
+            {
+                e.printStackTrace();
+            }
+            else
+            {
+                System.err.printf("System Error - Message: %s, Description: %s",
+                                  failureResponse.getMessage(),
+                                  failureResponse.getDescription());
+            }
+        }
+    }
+});
+</pre>
+<h3 id="10">10. Handling Errors on the Event Stream</h3>
+<p>The other place that errors can occur, specifically system errors, is on the event stream.
+    By default these errors are hidden - if a failure occurs on the event stream (e.g. the stream
+    is disconnected), it will automatically try to reconnect. However, if an API client requires
+    notification of an error that has occurred, it is possible to add an EventListener that will be
+    called back whenever an exception occurs on the event stream. The sole parameter passed to
+    the StreamFailureListener's notifyStreamFailure() method is the Exception that occurred. The API client
+    can make a decision about how it would like to proceed. If the API client would like to reconnect
+    to the event stream, then no action is necessary, though it may wish to log the exception.
+    However, if the client would like to shut down, then the stop method on Session can be used to
+    shut down the API client. The stop method should only be used when the client actually wants to
+    shut down. It is possible to start and stop the session multiple times, but it is not recommended
+    practice.</p>
+<pre>
+public class MyTradingBot implements LoginCallback, StreamFailureListener
+{
+    private Session session;
+
+    public void notifyStreamFailure(Exception exception)
+    {
+        if (clientShouldExit(exception))
+        {
+            session.stop();
+        }
+    }
+
+    public void onSuccess(Session session)
+    {
+        this.session = session;
+        session.registerStreamFailureListener(this);
+        session.start();  // This method will exit when session.stop is called.
+    }
+}
+</pre>
+
+<h3 id="11">11. Handling Session Disconnection</h3>
+
+<p>It is possible for the LMAX Exchange to log you out and disconnect your session. This may
+    happen if there have not been any requests on the session for a period (usually around 15 minutes),
+    or if your account has been locked. Timeouts can be avoided by making heartbeat requests
+    every 5 minutes or so.  HeartbeatClient.java (in the API src/sample folder) demonstrates how to
+    subscribe, request and process heartbeat requests.
+</p><p>
+    If your session has been disconnected, reconnecting the session is not possible, so this does not
+    happen automatically as it does for stream failures. A new session must be created by logging in again.
+    In order to be notified of your session being disconnected, you must register a SessionDisconnectedListener.
+    The default implementation of SessionDisconnectedListener simply logs an error to stderr.
+    An alternative implementation might be to attempt to log in again, or exit the program.
+</p>
+<pre>
+public class MyTradingBot implements LoginCallback, SessionDisconnectedListener
+{
+    private LmaxApi lmaxApi;
+    private Session session;
+    private int reconnectCount;
+
+    public void notifySessionDisconnected()
+    {
+        if (++reconnectCount &lt;= 3)
+        {
+            System.out.println("Session disconnected - attempting to log in again (attempt " + reconnectCount + ")");
+            lmaxApi.login(...);
+        }
+        else
+        {
+            System.err.println("Session disconnected - aborting after too many reconnect attempts");
+            System.exit(1);
+        }
+    }
+
+    public void onSuccess(Session session)
+    {
+        this.session = session;
+        session.registerSessionDisconnectedListener(this);
+        session.start();  // This method will exit when session.stop is called.
+    }
+}
+</pre>
+
+<h3 id="12">12. Using and Amending Stops</h3>
+The LMAX Trader platform supports stop loss and stop profit offsets for both limit and market
+orders.  Stops can be specified either in the constructor for the relevant Limit or Market order
+specification or by using the properties for stopLossPriceOffset and stopProfitPriceOffset.
+<pre>
+public class MyTradingBot implements LoginCallback, OrderBookEventListener, ExecutionEventListener
+{
+    private final List&lt;Long&gt; newOrders = new LinkedList&lt;Long&gt;();
+    private final List&lt;Long&gt; pendingOrders = new LinkedList&lt;Long&gt;();
+    private final List&lt;Order&gt; placedOrders = new LinkedList&lt;Order&gt;();
+
+    private final MarketOrderSpecification marketOrderSpecification =
+        new MarketOrderSpecification(0, 100, new FixedPointNumber("2.0"),
+                                     TimeInForce.IMMEDIATE_OR_CANCEL,
+                                     new FixedPointNumber("0.1"),
+                                     new FixedPointNumber("0.2"));
+
+    private final LimitOrderSpecification limitOrderSpecification =
+        new LimitOrderSpecification(1, 101, new FixedPointNumber("1.0"),
+                                    new FixedPointNumber("0.0"),
+                                    TimeInForce.GOOD_FOR_DAY);
+
+    public void placeMarketOrder(long instrumentId, final long instructionId)
+    {
+        // Place a market order to buy, note that we can re-use an
+        // order specification to place multiple orders but the instructionId
+        // must be reset each time a new order is placed
+        marketOrderSpecification.setInstrumentId(instrumentId);
+
+        marketOrderSpecification.setInstructionId(instructionId);
+        newOrders.add(instructionId);
+
+        session.placeMarketOrder(marketOrderSpecification, new OrderCallback()
+        {
+            public void onSuccess(long placeOrderInstructionId)
+            {
+                // note - this will be the same instructionId from above,
+                // it confirms this success is related to that specific place order request
+
+                //move from "new" to "pending" to show the order was successfully placed
+                newOrders.remove(placeOrderInstructionId);
+                pendingOrders.add(placeOrderInstructionId);
+            }
+
+            public void onFailure(FailureResponse failureResponse)
+            {
+                newOrders.remove(instructionId);
+                System.out.printf("Failed to place market order: %s%n", failureResponse);
+            }
+        });
+    }
+
+    public void placeSellLimitOrder(long instrumentId, FixedPointNumber sellPrice, final long instructionId)
+    {
+        // Place a limit order to sell.
+        limitOrderSpecification.setInstrumentId(instrumentId);
+        limitOrderSpecification.setPrice(sellPrice);
+        limitOrderSpecification.setQuantity(new FixedPointNumber("-2.0"));// Negative to indicate sell
+        limitOrderSpecification.setStopLossPriceOffset(new FixedPointNumber("0.2"));
+        
+        limitOrderSpecification.setInstructionId(instructionId);
+        newOrders.add(instructionId);
+
+        session.placeLimitOrder(limitOrderSpecification, new OrderCallback()
+        {
+            public void onSuccess(long placeOrderInstructionId)
+            {
+                //move from "new" to "pending" to show the order was successfully placed
+                newOrders.remove(placeOrderInstructionId);
+                pendingOrders.add(placeOrderInstructionId);
+            }
+
+            public void onFailure(FailureResponse failureResponse)
+            {
+                newOrders.remove(instructionId);
+                System.out.printf("Failed to place market order: %s%n", failureResponse);
+            }
+        });
+    }
+}
+</pre>
+Stops can also be amended after the order was placed using the specific amends stops request.
+An important point to remember is that a null will remove a previously specified stop. So
+if you only want to remove one of the stops (e.g. stop loss) you should remember to respecify
+the other one if required (e.g. stop profit).
+<pre>
+public class MyTradingBot implements LoginCallback, OrderBookEventListener, ExecutionEventListener
+{
+    private Session session;
+    private final Set&lt;Long&gt; amendInstructions = new HashSet&lt;Long&gt;();
+
+    public void amendStops(long instrumentId, long originalInstructionId, long instructionId,
+                           FixedPointNumber stopLossOffset, FixedPointNumber stopProfitOffset)
+    {
+        session.amendStops(new AmendStopsRequest(instrumentId, originalInstructionId, instructionId,
+                                                 stopLossOffset, stopProfitOffset), new OrderCallback()
+        {
+            public void onSuccess(long amendRequestInstructionId)
+            {
+                amendInstructions.add(amendRequestInstructionId);
+            }
+
+            public void onFailure(FailureResponse failureResponse)
+            {
+                System.out.printf("Failed to amend stop: %s%n", failureResponse);
+            }
+        });
+    }
+
+    public void removeStopLoss(long instrumentId, long originalInstructionId, long instructionId, FixedPointNumber oldStopProfitOffset)
+    {
+        // Use the oldStopProfitOffset to retain the stop profit for the order.
+        session.amendStops(new AmendStopsRequest(instrumentId, originalInstructionId, instructionId,
+                                                 null, oldStopProfitOffset), new OrderCallback()
+        {
+            public void onSuccess(long amendInstructionId)
+            {
+                amendInstructions.add(amendInstructionId);
+            }
+
+            public void onFailure(FailureResponse failureResponse)
+            {
+                System.out.printf("Failed to amend stop: %s%n", failureResponse);
+            }
+        });
+    }
+}
+</pre>
+
+Amending a stop may fail, for example if the stop has already fired.
+
+<h3 id="13">13. Subscribing to Other Events</h3>
+
+<p>As well as being able to <a href="Tutorial.html#5">subscribe to market data</a>, the
+    API allows you to subscribe to other types of event. These are all described further
+    on the Session interface. In each case, you need to add an event listener, then
+    subscribe to the event.</p>
+<dl>
+    <dt>Account State:</dt>
+    <dd>These allows you to keep track of your current balance, funds available to trade,
+        etc. Whenever an account state change is pushed out to the client, the notify method
+        on the AccountStateEventListener will be called passing in an AccountStateEvent that
+        will contain the latest details for your account.
+    </dd>
+    <dt>Execution:</dt>
+    <dd>These describe executions on your orders, i.e. fills.
+    </dd>
+    <dt>Order Book Status:</dt>
+    <dd>These describe order book status changes like the start of day Open event, end of
+        day Close event, and other statii like Suspended.
+    </dd>
+    <dt>Order Events:</dt>
+    <dd>These describe changes to your orders, e.g. if you add a stop loss to an order.
+    </dd>
+    <dt>Position Events:</dt>
+    <dd>These describe overall position changes, which happen on fills, cancels, etc.
+    </dd>
+    <dt>Order Book Events:</dt>
+    <dd>These describe market price changes (this is a high volume event stream).
+    </dd>
+</dl>
+
+<p>For example, subscribing to AccountState events:</p>
+<pre>
+public class MyTradingBot implements LoginCallback, AccountStateEventListener
+{
+    public void notify(AccountStateEvent accountStateEvent)
+    {
+        System.out.printf("Account state: %s%n", accountStateEvent);
+    }
+
+    public void onSuccess(Session session)
+    {
+        session.registerAccountStateEventListener(this);
+        session.subscribe(new AccountSubscriptionRequest(), new Callback()
+        {
+            public void onSuccess()
+            {
+                System.out.println("Successful subscription");
+            }
+
+            public void onFailure(FailureResponse failureResponse)
+            {
+                System.err.printf("Failed to subscribe: %s%n", failureResponse);
+            }
+        });
+
+        session.start();
+    }
+}
+</pre>
+
+<p>NB for simplicity the above example does not include a market data subscription, but it is perfectly permissible for a client to
+    subscribe for both types of events at once</p>
+
+<h3 id="14">14. Requesting Account State</h3>
+
+<p>As well as subscribing to account state changes as they happen, the API allows you to request the current account state.
+    This will result in an AccountStateEvent being issued immediately. To receive the event you need to have subscribed to
+    AccountStateEvents as described above.</p>
+
+<pre>
+public class MyTradingBot implements LoginCallback, AccountStateEventListener
+{
+    public void notify(AccountStateEvent accountStateEvent)
+    {
+        System.out.printf("Account state: %s%n", accountStateEvent);
+    }
+
+    public void onLoginSuccess(final Session session)
+    {
+        session.registerAccountStateEventListener(this);
+        session.subscribe(new AccountSubscriptionRequest(), new Callback()
+        {
+            public void onSuccess()
+            {
+                // Request account state
+                session.requestAccountState(accountStateRequest, accountStateCallback);
+            }
+
+            public void onFailure(FailureResponse failureResponse)
+            {
+                System.err.printf("Failed to subscribe: %s%n", failureResponse);
+            }
+        });
+
+        session.start();
+    }
+}
+</pre>
+
+<h3 id="15">15. Retrieving Security Definitions</h3>
+
+<p> The API allows you to retrieve security definitions. To do this create a <code>SearchInstrumentRequest</code> and provide an implementation of
+    <code>SearchInstrumentCallback</code>.
+<p> There are 2 main forms of the query string:</p>
+<ul>
+    <li>To find a specific instrument the "id: (instrumentId)" form can be used.</li>
+    <li>To do a general search, use a term such as "CURRENCY", which will find all of the currency instruments.
+        A search term like "UK" will find all of the instruments that have "UK" in the name.
+    </li>
+    <lI>An empty search term ("") will find all of the available instruments.</lI>
+</ul>
+<p>On a successful call the results will be returned in a <code>List&lt;Instrument&gt;</code> containing the first 25 results,
+    ordered alphabetically by name. If there are more results, the parameter <code>hasMoreResults</code> will be set to <code>true</code>. To retrieve
+    the next 25 instruments do another search, passing the id from the last instrument as the <code>offsetInstrumentId</code> of this new search.
+</p>
+<p>For example:
+</p>
+<pre>
+public class MyTradingBot implements LoginCallback
+{
+    @Override
+    public void onLoginSuccess(final Session session)
+    {
+        final String query = ""; // see above for how to do a more specific search
+        final long offsetInstrumentId = 0; // see above for more details on this offset parameter
+
+        final SearchInstrumentRequest searchInstrumentRequest = new SearchInstrumentRequest(query, offsetInstrumentId);
+
+        session.searchInstruments(searchInstrumentRequest, new SearchInstrumentCallback()
+        {
+            public void onSuccess(List&lt;Instrument&gt; instruments, boolean hasMoreResults)
+            {
+                System.out.println("Instruments Retrieved: " + instruments);
+                if(hasMoreResults)
+                {
+                    System.out.println("To continue retrieving all instruments please start next search from: " + instruments.get(instruments.size() - 1));
+                }
+            }
+
+            public void onFailure(FailureResponse failureResponse)
+            {
+                System.err.printf("Failed to retrieve instruments: %s%n", failureResponse);
+            }
+        });
+
+        session.start();
+    }
+
+    @Override
+    public void onLoginFailure(FailureResponse failureResponse)
+    {
+        // failed to login
+    }
+}
+</pre>
+
+<h3 id="16">16. Retrieving Historic Market Data</h3>
+<p>In addition to subscribing to real-time market data, the API provides a mechanism for retrieving historic market data.
+    Two types of historic market data are supported:</p>
+<ul>
+    <li><code>TopOfBookHistoricMarketDataRequest</code> - Best bid & ask tick data.</li>
+    <li><code>AggregateHistoricMarketDataRequest</code> - Aggregated price & volume data by day or minute.</li>
+</ul>
+
+<p>The data is delivered as a gzip-compressed CSV file.</p>
+
+<p>The following steps are required to receive historic market data:</p>
+<ol>
+    <li>Implement and register a <code>HistoricMarketDataEventListener</code>
+    <li>Subscribe to historic market data events
+    <li>Make historic market data requests
+    <li>Retrieve URLs within an authenticated session
+</ol>
+
+<p>
+    The code snipets below are extracted from the class <code>HistoricMarketDataRequester</code> in the <code>samples</code> directory of the API.
+</p>
+
+<h4 id="16.1">16.1. Implement and register a <code>HistoricMarketDataEventListener</code></h4>
+
+<p>To receive historic market data, you must first create a class that implements <code>HistoricMarketDataEventListener</code> and
+    register an instance of the class with the session:</p>
+
+<pre>
+session.registerHistoricMarketDataEventListener(aListener);
+</pre>
+
+<h4 id="16.2">16.2. Subscribe to historic market data events</h4>
+
+Use the standard <code>session.subscribe()</code> mechanism to subscribe to historic market data requests:
+
+<pre>
+session.subscribe(new HistoricMarketDataSubscriptionRequest(), new Callback()
+{
+    public void onSuccess()
+    {
+        // subscription request succeeded
+    }
+
+    public void onFailure(final FailureResponse failureResponse)
+    {
+        // subscription request failed
+    }
+});
+</pre>
+
+As with other subscriptions, you can <code>subscribe</code> before you call <code>session.start()</code>.
+
+<h4 id="16.3">16.3. Make historic market data requests</h4>
+
+<p>To request historic market data for a specific instrument and date range, create an instance of <code>TopOfBookHistoricMarketDataRequest</code> or
+    <code>AggregateHistoricMarketDataRequest</code> and call the <code>requestHistoricMarketData</code> method on the session:</p>
+
+<pre>
+// Request historic market data
+final HistoricMarketDataRequest request = new TopOfBookHistoricMarketDataRequest(instructionId,
+                                                                                    instrumentId,
+                                                                                    toDate("2011-09-01"),
+                                                                                    toDate("2011-10-01"),
+                                                                                    HistoricMarketDataRequest.Format.CSV);
+session.requestHistoricMarketData(request, new Callback()
+{
+    public void onSuccess()
+    {
+        // Successful request - will be asynchronously notified when files are ready for download.
+    }
+
+    public void onFailure(final FailureResponse failureResponse)
+    {
+        System.err.printf("Failed to request historic market data: %s%n", failureResponse);
+    }
+});
+</pre>
+
+<p>Each request requires a start and end date. In the above code, we used a <code>SimpleDateFormat</code> to parse the date strings
+    into <code>Date</code> objects:</p>
+<pre>
+private final DateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
+
+private Date toDate(final String string)
+{
+    try
+    {
+        return dateFormat.parse(string);
+    }
+    catch (final ParseException e)
+    {
+        throw new RuntimeException(e);
+    }
+}
+</pre>
+
+<h4 id="16.4">16.4. Retrieve URLs within an authenticated session</h4>
+<p>
+    When the data is ready, the listener you registered in step 16.1 will receive an asynchronous message with a list of URLs.
+    The asynchronous message also includes the instructionId you included with the request.
+</p>
+
+<p>
+    The URLs must be retrieved using an authenticated connection. You can use the session's <code>openUrl()</code> method to
+    open each URL. The files at the URLs are compressed with gzip. The code snippet below shows how to
+    retrieve the URL and print out the uncompressed data:
+</p>
+
+<pre>
+public void notify(final HistoricMarketDataEvent historicMarketDataEvent)
+{
+    // Open and process urls
+    for (final URL url : historicMarketDataEvent.getUrls())
+    {
+        session.openUrl(url, new UrlCallback()
+        {
+            public void onSuccess(final URL url, final InputStream inputStream)
+            {
+                printCompressedFileContents(inputStream);
+            }
+
+            public void onFailure(final FailureResponse failureResponse)
+            {
+                System.err.printf("Failed to open url: %s%n", failureResponse);
+            }
+        });
+    }
+}
+
+private void printCompressedFileContents(final InputStream compressedInputStream)
+{
+    try
+    {
+        byte[] buffer = new byte[1024];
+        final GZIPInputStream decompressedInputStream = new GZIPInputStream(compressedInputStream);
+        int numBytes = decompressedInputStream.read(buffer);
+        while (numBytes != -1)
+        {
+            System.out.print(new String(buffer, 0, numBytes));
+            numBytes = decompressedInputStream.read(buffer);
+        }
+    }
+    catch (IOException e)
+    {
+        throw new RuntimeException("Unable to print compressed file contents", e);
+    }
+}
+</pre>
+
+<h3 id="17">17. HTTP Keep-Alive</h3>
+<p>The LMAX Java API uses the standard JDK HTTP Connection, which supports Keep-Alive out of the box. It is enabled by
+    default so there is nothing special that needs to be done to enable it. However if you want to tune Keep-Alive for
+    performance or disable it can be done using the Java system properties of <code>http.keepAlive</code> and
+    <code>http.maxConnections</code>. These are defaulted to <code>true</code> and <code>5</code> respectively.</p>
+<p>The <a href="http://download.oracle.com/javase/1.5.0/docs/guide/net/http-keepalive.html">Oracle JDK documentation</a>
+    provides more detail on its HTTP connection pooling behaviour.</p>
+
+<h3 id="18">18. Protocol Version Checking</h3>
+<p>By default, the LMAX Java API checks that the current protocol version used by the LMAX Trader Platform matches the
+    version that the LMAX Java API was built for. This strict checking can be disabled when constructing the
+    <code>LoginRequest</code> by supplying <code>false</code> as the fourth parameter:</p>
+
+<pre>lmaxAPI.login(new LoginRequest(username, password, LoginRequest.ProductType.CFD_LIVE, false), loginCallback);</pre>
+
+<h3 id="19">19. Order and Execution Tracking</h3>
+<p>When it comes to tracking orders and executions the LMAX Java API does not behave in exactly the same way that FIX does.
+   This means it can be a little bit tricky to recognise the last Execution event corresponding to a given Order event.</p>
+
+<p>For example, if an individual order with a quantity of 30 aggressively matches multiple price points (quantity of 10 at
+   each) on the exchange, a fix user would expect would expect:</p>
+
+<pre>
+MsgType(35)=8, ExecType(150)=New(0), CumQty(14)=0
+MsgType(35)=8, ExecType(150)=Trade(F), CumQty(14)=10
+MsgType(35)=8, ExecType(150)=Trade(F), CumQty(14)=20
+MsgType(35)=8, ExecType(150)=Trade(F), CumQty(14)=30
+</pre>
+
+<p>Since our API is based upon our XML protocol the information that we can return on the API is restricted to what is
+   included in the XML messages.  For a similar scenario our XML protocol only emits a single order event at the end
+   of the matching cycle, therefore the data output would be:</p>
+
+<pre>
+&lt;order&gt;
+  &lt;timeInForce&gt;ImmediateOrCancel&lt;/timeInForce&gt;
+  &lt;instructionId&gt;1733844027851145216&lt;/instructionId&gt;
+  &lt;originalInstructionId&gt;1733844027851145216&lt;/originalInstructionId&gt;
+  &lt;orderId&gt;AAK8oAAAAAAAAAAF&lt;/orderId&gt;
+  &lt;accountId&gt;1393236922&lt;/accountId&gt;
+  &lt;instrumentId&gt;179361&lt;/instrumentId&gt;
+  &lt;quantity&gt;30&lt;/quantity&gt;
+  &lt;matchedQuantity&gt;30&lt;/matchedQuantity&gt;
+  &lt;matchedCost&gt;22.1&lt;/matchedCost&gt;
+  &lt;cancelledQuantity&gt;0&lt;/cancelledQuantity&gt;
+  &lt;timestamp&gt;2011-12-22T10:09:25&lt;/timestamp&gt;
+  &lt;orderType&gt;STOP_COMPOUND_MARKET&lt;/orderType&gt;
+  &lt;openQuantity&gt;20&lt;/openQuantity&gt;
+  &lt;openCost&gt;22.1&lt;/openCost&gt;
+  &lt;cumulativeCost&gt;22.1&lt;/cumulativeCost&gt;
+  &lt;commission&gt;0&lt;/commission&gt;
+  &lt;stopReferencePrice&gt;111&lt;/stopReferencePrice&gt;
+  &lt;stopLossOffset /&gt;
+  &lt;stopProfitOffset /&gt;
+  &lt;executions&gt;
+    &lt;executionId&gt;3&lt;/executionId&gt;
+    &lt;execution&gt;
+      &lt;price&gt;110&lt;/price&gt;
+      &lt;quantity&gt;10&lt;/quantity&gt;
+    &lt;/execution&gt;
+    &lt;execution&gt;
+      &lt;price&gt;111&lt;/price&gt;
+      &lt;quantity&gt;10&lt;/quantity&gt;
+    &lt;/execution&gt;
+    &lt;execution&gt;
+      &lt;price&gt;112&lt;/price&gt;
+      &lt;quantity&gt;10&lt;/quantity&gt;
+    &lt;/execution&gt;
+  &lt;/executions&gt;
+&lt;/order&gt;
+</pre>
+
+<p>This means that the Java API does not have the information about the individual filled quantities as a result of
+   each execution, only the final state of the order.  This can make it a little tricky to find which Execution event
+   represents the end of the matching cycle. The information seen by a user of the Java API for the same scenario would
+   be:</p>
+
+<pre>
+getQuantity() = 10, getOrder.getFilledQuantity() = 30
+getQuantity() = 10, getOrder.getFilledQuantity() = 30
+getQuantity() = 10, getOrder.getFilledQuantity() = 30
+</pre>
+
+<p>However, it is possible to use some of the additional events that are available on the Java API to derive the same 
+   behaviour.  By listening to both Execution and Order events we can track the cumulative quantities as we go.  It does 
+   require a little bit more state management by the client, but the logic is fairly straight forward:</p>
+
+<pre>
+public class ExecutionTracking implements OrderEventListener, ExecutionEventListener
+{
+    private final Session tradingSession;
+    final Map&lt;Long, Order&gt; lastOrderStateByInstructionId = new HashMap&lt;Long, Order&gt;();
+    Order currentOrder = null;
+    long currentFilledQuantity;
+    long currentCancelledQuantity;
+
+    public ExecutionTracking(final Session tradingSession)
+    {
+        this.tradingSession = tradingSession;
+    }
+
+    /**
+     * The order event will <b>always</b> arrive before the associated execution events for that order.
+     */
+    public void notify(final Order order)
+    {
+        final Order previousOrderState = lastOrderStateByInstructionId.get(order.getInstructionId());
+        if (null != previousOrderState)
+        {
+            // Track the current filled/cancelled quantity as a delta between this
+            // order event and the previous one of the same order.
+            currentFilledQuantity = previousOrderState.getFilledQuantity().longValue();
+            currentCancelledQuantity = previousOrderState.getCancelledQuantity().longValue();
+        }
+        else
+        {
+            // The is the first order event for this order, so start from zero.
+            currentFilledQuantity = 0;
+            currentCancelledQuantity = 0;
+        }
+
+        currentOrder = order;
+    }
+
+    public void notify(final Execution execution)
+    {
+        // As we receive the executions for the order increment the quantities for each execution
+        currentFilledQuantity += execution.getQuantity().longValue();
+        currentCancelledQuantity += execution.getCancelledQuantity().longValue();
+
+        // Once our per execution tracking of the order matches the totals on the
+        // order itself, we've found the last execution for a given order event.
+        if (currentOrder.getFilledQuantity().longValue() == currentFilledQuantity &&
+            currentOrder.getCancelledQuantity().longValue() == currentCancelledQuantity)
+        {
+            System.out.printf("Last Execution: %s for order: %s%n", execution, currentOrder);
+
+            if (isComplete(execution.getOrder()))
+            {
+                // The order has completed, all quantity is filled or cancelled, so remove the order from
+                lastOrderStateByInstructionId.remove(currentOrder.getInstructionId());
+            }
+            else
+            {
+                // Track the order event for the next match
+                lastOrderStateByInstructionId.put(currentOrder.getInstructionId(), currentOrder);
+            }
+            
+            currentOrder = null;
+        }
+    }
+    
+    private boolean isComplete(Order order)
+    {
+        long completedQuantity = order.getFilledQuantity().longValue() + order.getCancelledQuantity().longValue();
+        return order.getQuantity().longValue() == completedQuantity;
+    }
+
+    public void subscribe()
+    {
+        // Listen for both Order and Execution events
+        tradingSession.registerOrderEventListener(this); 
+        tradingSession.registerExecutionEventListener(this);
+        // Only subscription to execution events is required
+        tradingSession.subscribe(new ExecutionSubscriptionRequest(), executionSubscriptionRequestCallBack);
+    }
+}
+</pre>
+
+<h3 id="20">20. Debug logging and profiling callbacks</h3>
+<p>Occasionally it is necessary for the purposes of problem analysis to get a better picture of how the Java
+   API is behaving.  There are 2 mechanisms that provide information more insight into applications using
+   the API.  First is the ability to log all of the XML messages that arrive on the event stream.</p>
+      
+<p>Enabling the event stream debug logging requires the user to provider an implemenation of a <code>java.io.Writer</code>
+   and call <code>Session.setEventStreamDebug(...)</code>. A RollingFileWriter is a class provided by the API to roll 
+   the file being logged when it exceeds a specific size.  The call to <code>Session.setEventStreamDebug(...)</code>
+   must happen before <code>Session.start()</code> is called.</p>
+
+<pre>
+public void onLoginSuccess(final Session session)
+{
+    Writer writer = new RollingFileWriter(new File("/tmp/lmax"), "event-stream-%s.log", 5000000);
+    session.setEventStreamDebug(writer);
+
+    session.start();
+}
+</pre>
+
+<p>If there is a need to measure the performance of the implementation of a callback listener then the Java API
+   provides a utility class to help.  Only OrderBook, Order, InstructionRejected and Execution events are 
+   currently supported.  The utility creates an MBean that will register itself with the platform mbean 
+   server.  This will track and collate the latency of a particular callback and present it in a 
+   log-scaled histogram.</p>
+   
+<p>The <code>Timer</code> factory class provides a number of static methods that will wrap the implemented listener.
+   The code below shows how the timers are created.</p>
+
+<pre>
+public void onLoginSuccess(final Session session)
+{
+    session.registerOrderBookEventListener(Timer.forOrderBookEvents(this));
+    session.registerOrderEventListener(Timer.forOrderEvents(this));
+    session.registerInstructionRejectedEventListener(Timer.forInstructionRejectedEvents(this));
+    session.registerExecutionEventListener(Timer.forExecutionEvents(this));
+
+    session.start();
+}
+</pre>
+   
